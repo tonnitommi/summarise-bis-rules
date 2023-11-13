@@ -1,5 +1,7 @@
+from urllib.parse import urljoin
 from robocorp.tasks import task
-from robocorp import vault
+from robocorp import vault, storage
+from robocorp.storage._client import AssetNotFound
 from bs4 import BeautifulSoup
 import requests
 from RPA.HTTP import HTTP
@@ -10,25 +12,35 @@ from openai import OpenAI
 
 @task
 def summarize_new_things():
+    try:
+        bis_docs = storage.get_json("bis-docs")
+    except AssetNotFound as e:
+        bis_docs = []
 
-    # Set Robocorp libs up
-    http = HTTP()
-    pdf = PDF()
+    links = get_bis_rule_doc_links()
+    for url in links:
+        if url in bis_docs:
+            print(f"URL {url} already summarized - skipping")
+            continue
+        print(f"Summarizing URL {url}")
+        summary = summarize_doc(url)
+        slack_it(summary, url)
+        bis_docs.append(url)
+        storage.set_json("bis-docs", bis_docs)
 
+
+def summarize_doc(url: str) -> str:
     openai_secret = vault.get_secret("OpenAI")
 
     client = OpenAI(
         api_key=openai_secret["key"]
     )
+    # Set Robocorp libs up
+    http = HTTP()
+    pdf = PDF()
 
-    links = get_links()
-    baseurl = "https://www.bis.doc.gov"
-
-    # only do the first for the funs
-    dl_url = baseurl+links[0]
-    print(dl_url)
-    filename = "files/" + dl_url.split('=')[-1] + ".pdf"
-    http.download(dl_url, filename)
+    filename = "files/" + url.split('=')[-1] + ".pdf"
+    http.download(url, filename)
 
     # then read the text
     text = pdf.get_text_from_pdf(filename)
@@ -52,14 +64,16 @@ def summarize_new_things():
         model="gpt-4-1106-preview",
     )
 
-    slack_it(completion.choices[0].message.content, dl_url)
+    return completion.choices[0].message.content
 
 
-def get_links():
-    response = requests.get("https://www.bis.doc.gov/index.php/federal-register-notices")
+def get_bis_rule_doc_links() -> list[str]:
+    base_url = "https://www.bis.doc.gov/"
+    response = requests.get(f"{base_url}index.php/federal-register-notices")
     soup = BeautifulSoup(response.content, 'html.parser')
     links = soup.find_all('a', text=lambda text: text and "BIS Rule" in text)
-    return [link.get('href') for link in links]
+    return [urljoin(base_url, link.get('href')) for link in links]
+
 
 def slack_it(message, link):
     slack_secrets = vault.get_secret("Slack")
